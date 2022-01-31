@@ -12,6 +12,6 @@ setup(
     keywords=[],
 
     packages=["bztnewrelic"],
-    install_requires=['bzt'],
+    install_requires=['bzt','newrelic-telemetry-sdk'],
     include_package_data=True,
 )

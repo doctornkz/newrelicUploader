@@ -6,7 +6,7 @@ settings:
 
 modules:
   newrelic:
-    class: bztnewrelic.newrelicpluginplugin.NewRelicUploader
+    class: bztnewrelic.newrelicplugin.NewRelicUploader
 
   # disable undesired modules
   ^grinder: null
