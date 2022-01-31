@@ -11,7 +11,7 @@ setup(
     url='https://github.com/doctornkz/newrelicUploader',
     keywords=[],
 
-    packages=["newrelic"],
+    packages=["bztnewrelic"],
     install_requires=['bzt'],
     include_package_data=True,
 )
