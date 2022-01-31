@@ -139,7 +139,7 @@ class NewRelicUploader(Reporter, AggregatorListener, Singletone):
         self._session = None
         self.first_ts = sys.maxsize
         self.last_ts = 0
-        self._dpoint_serializer = DatapointSerializerSFX(self)
+        self._dpoint_serializer = DatapointSerializerNF(self)
 
     def token_processor(self):
         # Read from config file
@@ -268,12 +268,12 @@ class NewRelicUploader(Reporter, AggregatorListener, Singletone):
         self.kpi_buffer.append(data)
 
 
-class DatapointSerializerSFX(object):
+class DatapointSerializerNF(object):
     def __init__(self, owner):
         """
         :type owner: NewRelicUploader
         """
-        super(DatapointSerializerSFX, self).__init__()
+        super(DatapointSerializerNF, self).__init__()
         self.owner = owner
         self.multi = 1000  # miltiplier factor for reporting
 
