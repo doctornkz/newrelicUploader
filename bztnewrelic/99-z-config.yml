@@ -1,0 +1,35 @@
+
+  
+---
+settings:
+  artifacts-dir: .
+
+modules:
+  newrelic:
+    class: bztnewrelic.newrelicpluginplugin.NewRelicUploader
+
+  # disable undesired modules
+  ^grinder: null
+  ^locust: null
+  ^molotov: null
+  ^cloud: null
+  ^blazemeter: null
+  ^proxy2jmx: null
+
+
+cli-aliases:
+  hw:
+    reporting:
+      - newrelic
+
+---
+modules:
+  consolidator:
+    ~percentiles:
+      - 0.0
+      - 50.0
+      - 90.0
+      - 95.0
+      - 99.0
+      - 99.9
+      - 100.0
