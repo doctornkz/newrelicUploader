@@ -115,6 +115,9 @@ class Session(object):
         if response != 0:
             print("Response incorrect, exiting...")
             exit(1)
+    def client_close(self):
+        self.metric_client.close()
+
 
 class NewRelicUploader(Reporter, AggregatorListener, Singletone):
     """
@@ -266,6 +269,7 @@ class NewRelicUploader(Reporter, AggregatorListener, Singletone):
         :param data: DataPoint
         """
         self.kpi_buffer.append(data)
+
 
 
 class DatapointSerializerNF(object):
