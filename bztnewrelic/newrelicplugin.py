@@ -144,6 +144,7 @@ class NewRelicUploader(Reporter, AggregatorListener, Singletone):
         self.first_ts = sys.maxsize
         self.last_ts = 0
         self._dpoint_serializer = DatapointSerializerNF(self)
+        self.log = logging.getLogger(self.__class__.__name__)
 
     def token_processor(self):
         # Read from config file
@@ -281,6 +282,7 @@ class DatapointSerializerNF(object):
         super(DatapointSerializerNF, self).__init__()
         self.owner = owner
         self.multi = 1000  # multiplier factor for reporting
+        self.log = logging.getLogger(self.__class__.__name__)
 
     def get_kpi_body(self, data_buffer, tags, is_final):
         # - reporting format:
