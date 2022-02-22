@@ -27,7 +27,6 @@ from bzt.utils import dehumanize_time
 from newrelic_telemetry_sdk import GaugeMetric, CountMetric, SummaryMetric, MetricClient
 
 NETWORK_PROBLEMS = (IOError, URLError, SSLError, ReadTimeout, TaurusNetworkError)
-DEBUG = True
 
 def send_with_retry(method):
     @wraps(method)
@@ -67,9 +66,9 @@ class Session(object):
         try: 
             self.metric_client = MetricClient(os.environ["NEW_RELIC_INSERT_KEY"])
 
-        except  Exception as e:
-            print("Error in NR Client initialization: ", e) 
-            print("Exiting...")
+        except Exception:
+            self.log.error("Error in NR Client initialization: %s", traceback.format_exc())
+            self.log.info("Exiting...")
             exit(0)
 
     def _request(self, data=None, headers=None, method=None, raw_result=False, retry=True):
@@ -87,7 +86,7 @@ class Session(object):
             try:
                 response = self.metric_client.send_batch(data)
                 response.raise_for_status()
-
+                self.log.debug("Status code from API: %d", response.status)
             except:
                 if retry and retry_limit:
                     retry_limit -= 1
@@ -113,9 +112,11 @@ class Session(object):
         response = self._request(data)
 
         if response != 0:
-            print("Response incorrect, exiting...")
+            self.log.error("Response incorrect - %d, exiting... ", response)
             exit(1)
+
     def client_close(self):
+        self.log.debug("Closing NewRelic client...")
         self.metric_client.close()
 
 
@@ -258,8 +259,8 @@ class NewRelicUploader(Reporter, AggregatorListener, Singletone):
         :type data: list[bzt.modules.aggregator.DataPoint]
         """
 
+        self.log.debug("Length of data to serialize: %d", len(data))
         serialized = self._dpoint_serializer.get_kpi_body(data, self.additional_tags, is_final)
-
 
         self._session.send_kpi_data(serialized, do_check)
 
@@ -279,7 +280,7 @@ class DatapointSerializerNF(object):
         """
         super(DatapointSerializerNF, self).__init__()
         self.owner = owner
-        self.multi = 1000  # miltiplier factor for reporting
+        self.multi = 1000  # multiplier factor for reporting
 
     def get_kpi_body(self, data_buffer, tags, is_final):
         # - reporting format:
@@ -307,6 +308,8 @@ class DatapointSerializerNF(object):
                     nr_batch = self.__convert_data(kpi_set, time_stamp * self.multi, nrtags)
                     nr_metrics.extend(nr_batch)
 
+        self.log.debug("Custom metrics in batch: %d", len(nr_batch))
+
         return nr_metrics
 
     def __convert_data(self, item, timestamp, nrtags):
@@ -317,7 +320,8 @@ class DatapointSerializerNF(object):
         tavg = self.multi * item[KPISet.AVG_RESP_TIME]
         
         nrtags["timestamp"] = timestamp 
-
+        self.log.debug("Timestamp in data convertion: %d", timestamp)
+        
         data = [
             GaugeMetric('bztRPS', item[KPISet.SAMPLE_COUNT], nrtags),
             GaugeMetric('bztThreads', item[KPISet.CONCURRENCY], nrtags),
