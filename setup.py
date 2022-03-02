@@ -2,7 +2,7 @@ from setuptools import setup
 
 setup(
     name="bztnewrelic",
-    version="0.2.3",
+    version="0.2.4",
 
     author="Oles Pisarenko",
     author_email="doctornkz@ya.ru",
