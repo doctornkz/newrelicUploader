@@ -1,2 +1,2 @@
 include bztnewrelic/bzt-configs.json
-include bztnewrelic/99-z-config.yml
+include bztnewrelic/98-z-config.yml
