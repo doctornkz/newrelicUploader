@@ -325,23 +325,23 @@ class DatapointSerializerNF(object):
         self.log.debug("Timestamp in data convertion: %d", timestamp)
         
         data = [
-            GaugeMetric('bztRPS', item[KPISet.SAMPLE_COUNT], nrtags),
-            GaugeMetric('bztThreads', item[KPISet.CONCURRENCY], nrtags),
-            GaugeMetric('bztFailures', item[KPISet.FAILURES], nrtags),
-            GaugeMetric('bztmin', tmin, nrtags),
-            GaugeMetric('bztmax', tmax, nrtags),
-            GaugeMetric('bztavg', tavg, nrtags) 
+            GaugeMetric('bztRPS', item[KPISet.SAMPLE_COUNT], nrtags, end_time_ms=timestamp),
+            GaugeMetric('bztThreads', item[KPISet.CONCURRENCY], nrtags, end_time_ms=timestamp),
+            GaugeMetric('bztFailures', item[KPISet.FAILURES], nrtags, end_time_ms=timestamp),
+            GaugeMetric('bztmin', tmin, nrtags, end_time_ms=timestamp),
+            GaugeMetric('bztmax', tmax, nrtags, end_time_ms=timestamp),
+            GaugeMetric('bztavg', tavg, nrtags, end_time_ms=timestamp) 
         ]
 
         for p in item[KPISet.PERCENTILES]:
             tperc = int(self.multi * item[KPISet.PERCENTILES][p])
-            data.append(GaugeMetric('bztp' + p, tperc, nrtags))
+            data.append(GaugeMetric('bztp' + p, tperc, nrtags, end_time_ms=timestamp))
 
         # Detailed info : Error
         for rcode in item[KPISet.RESP_CODES]:
             error_tags = copy.deepcopy(nrtags)
             error_tags['rc'] = rcode
             rcnt = item[KPISet.RESP_CODES][rcode]
-            data.append(GaugeMetric('bztcode', rcnt, error_tags))
+            data.append(GaugeMetric('bztcode', rcnt, error_tags, end_time_ms=timestamp))
 
         return data
