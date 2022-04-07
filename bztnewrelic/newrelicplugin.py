@@ -2,8 +2,9 @@
 Based on bza.py (Blazemeter API client) module, and adopted as-is for NewRelic API
 """
 
+from asyncio import sleep
 import copy
-import json
+import datetime
 import logging
 import os
 import sys
@@ -24,7 +25,9 @@ from bzt.six import iteritems, URLError
 from bzt.utils import open_browser
 from bzt.utils import dehumanize_time
 
-from newrelic_telemetry_sdk import GaugeMetric, CountMetric, SummaryMetric, MetricClient
+from newrelic_telemetry_sdk import GaugeMetric, MetricClient
+from python_graphql_client import GraphqlClient
+
 
 NETWORK_PROBLEMS = (IOError, URLError, SSLError, ReadTimeout, TaurusNetworkError)
 
@@ -54,6 +57,7 @@ class Session(object):
     def __init__(self):
         super(Session, self).__init__()
         self.dashboard_url = 'https://onenr.io/PLACEHOLDER'
+     
         self.timeout = 30
         self.logger_limit = 256
         self.token = None
@@ -63,14 +67,17 @@ class Session(object):
         self._retry_limit = 5
         self.uuid = None
 
+        
+    def client_init(self):
         try: 
-            self.metric_client = MetricClient(os.environ["NEW_RELIC_INSERT_KEY"])
+            self.metric_client = MetricClient(self.token)
 
         except Exception:
-            self.log.error("Error in NR Client initialization: %s", traceback.format_exc())
-            self.log.info("Exiting...")
+            self.log.error('Error in NR Client initialization: %s', traceback.format_exc())
+            self.log.info('Exiting...')
             exit(0)
 
+ 
     def _request(self, data=None, headers=None, method=None, raw_result=False, retry=True):
         """
         :param url: str
@@ -129,12 +136,12 @@ class NewRelicUploader(Reporter, AggregatorListener, Singletone):
 
     def __init__(self):
         super(NewRelicUploader, self).__init__()
-        self.browser_open = 'start'
+        self.browser_open = 'none'
         self.project = 'myproject'
         self.custom_tags = {}
         self.additional_tags = {}
         self.kpi_buffer = []
-        self.send_interval = 30
+        self.send_interval = 5
         self._last_status_check = time.time()
         self.last_dispatch = 0
         self.results_url = None
@@ -143,6 +150,9 @@ class NewRelicUploader(Reporter, AggregatorListener, Singletone):
         self._session = None
         self.first_ts = sys.maxsize
         self.last_ts = 0
+        self.dashboard_generator_on = False
+        self.dashboard_url = 'https://one.newrelic.com/dashboards' # default URL
+
         self._dpoint_serializer = DatapointSerializerNF(self)
         self.log = logging.getLogger(self.__class__.__name__)
 
@@ -176,6 +186,38 @@ class NewRelicUploader(Reporter, AggregatorListener, Singletone):
             
         return None
 
+    # TODO: deduplicate
+    def api_token_processor(self):
+        # Read from config file
+        api_token = self.settings.get("api-token", "")
+        if api_token:
+            self.log.info("API token found in config file")
+            return api_token
+        self.log.info("API token not found in config file")
+        # Read from environment
+        try:
+            api_token = os.environ['NEW_RELIC_API_KEY']
+            self.log.info("Token found in NEW_RELIC_API_KEY environment variable")
+            return api_token
+        except:
+            self.log.info("API token not found in NEW_RELIC_API_KEY environment variable")
+            pass
+        # Read from file
+        try:
+            api_token_file = self.settings.get("api-token-file","")
+            if api_token_file:
+                with open(api_token_file, 'r') as handle:
+                        api_token = handle.read().strip()
+                        self.log.info("Token found in file %s:", api_token_file)
+                        return api_token
+            else:
+                self.log.info("Parameter api_token_file is empty or doesn't exist")
+        except:
+            self.log.info("Token can't be retrieved from file: %s, please check path or access", api_token_file)
+            
+        return None
+
+
     def prepare(self):
         """
         Read options for uploading, check that they're sane
@@ -187,22 +229,78 @@ class NewRelicUploader(Reporter, AggregatorListener, Singletone):
         self.custom_tags = self.settings.get("custom-tags", self.custom_tags)
         self._dpoint_serializer.multi = self.settings.get("report-times-multiplier", self._dpoint_serializer.multi)
         
+
+        #### Dashboard manager related settings: 
+        self.static_report = self.settings.get("static-report", 'false')
+        self.api_endpoint = self.settings.get("api-endpoint", 'https://api.newrelic.com/graphql')
+        self.account_id = self.settings.get("account-id", '')
+
+        api_token = self.api_token_processor()
+        if not api_token:
+             self.log.warning("NewRelic API token is not provided, dashboard generator is disabled.")
+             self.dashboard_generator_on = False
+        else:
+            self.log.info("NewRelic API token is provided, dashboard generator is activated.")
+            self.dashboard_generator_on = True
+
+        # Dashboard management
+
+        self._dashboard = DashboardManager()
+        self._dashboard.api_token = api_token
+        self._dashboard.account_id = self.account_id
+        self._dashboard.client_init()
+
+
+
+        if self.account_id is '':
+            if self._dashboard.get_account_id() == '':
+                self.log.warning('NewRelic AccountId is not set. Please check `account-id` config setting ')
+                self.log.warning('Dashboard generator is disabled.')
+                self.dashboard_generator_on = False
+            else: 
+                self._dashboard.account_id = self.account_id
+
+
+        if not self._dashboard.api_check():
+            self.log.warning('NewRelic API token is wrong or enpoint is not correct.')
+            self.log.warning('Dashboard generator is disabled.')
+            self.dashboard_generator_on = False
+
+        # Check dashboard template 
+        self.dashboard_template_path = self.settings.get("dashboard-template-path", '')
+        try:
+            with open(self.dashboard_template_path, 'r', encoding='utf-8') as template:
+                self.log.info('Using existing template from %s' % self.dashboard_template_path)
+                self._dashboard.template = template.read()
+        except FileNotFoundError as fnfe:
+            self.log.warning('Problem with template file, %s' % fnfe)
+            self.dashboard_generator_on = False
+            self.log.warning('Dashboard generator is disabled.')
+        except Exception as e:
+            self.log.warning('Problem with template', e)
+            self.dashboard_generator_on = False
+            self.log.warning('Dashboard generator is disabled.')
         
-        token = self.token_processor()
-        if not token:
-            raise TaurusConfigError("No NewRelic API key provided")
+
+        if self.dashboard_generator_on:
+            self.dashboard_url = self._dashboard.dashboard_link(self.project)
 
         # direct data feeding case
+
+        token = self.token_processor()
+        if not token:
+            raise TaurusConfigError("NewRelic Ingest key is not provided")
 
         self.sess_id = str(uuid.uuid4())
         self.additional_tags.update({'project': self.project, 'id': self.sess_id})
         self.additional_tags.update(self.custom_tags)
         self._session = Session()
+
         self._session.log = self.log.getChild(self.__class__.__name__)
         self._session.token = token
-        self._session.dashboard_url = self.settings.get("dashboard-url", self._session.dashboard_url).rstrip("/")
+        self._session.client_init()
+        self._session.dashboard_url = self.dashboard_url
         self._session.timeout = dehumanize_time(self.settings.get("timeout", self._session.timeout))
-
         try:
            self._session.ping()  # to check connectivity and auth
         except Exception:
@@ -216,12 +314,16 @@ class NewRelicUploader(Reporter, AggregatorListener, Singletone):
         Initiate online test
         """
 
+        self.time_start = time.time() * 1000
+
         super(NewRelicUploader, self).startup()
 
         self.results_url = self._session.dashboard_url
         self.log.info("Started data feeding: %s", self.results_url)
         if self.browser_open in ('start', 'both'):
             open_browser(self.results_url)
+
+
 
     def post_process(self):
         """
@@ -236,8 +338,16 @@ class NewRelicUploader(Reporter, AggregatorListener, Singletone):
 
         if self.browser_open in ('end', 'both'):
             open_browser(self.results_url)
-        self.log.info("Report link: %s", self.results_url)
+
+        ### If permlink will fail on first step, we will generate at on last moment
+        if self.dashboard_generator_on:
+            self.dashboard_url = self._dashboard.dashboard_link(self.project)
+
+        self.log.info("Report link: %s", self.dashboard_url)
         
+        if self.static_report:
+            self._dashboard.create_pdf(self.time_start, time.time() * 1000)
+
         self._session.client_close() 
         
 
@@ -345,3 +455,205 @@ class DatapointSerializerNF(object):
             data.append(GaugeMetric('bztcode', rcnt, error_tags, end_time_ms=timestamp))
 
         return data
+
+
+class DashboardManager():
+
+    ### Client initialization 
+    def __init__(self) -> None:
+        self.api_token = None
+        self.log = logging.getLogger(self.__class__.__name__)
+        self.api_endpoint = 'https://api.newrelic.com/graphql'
+        self.api_token = None
+        self.static_report = 'false'
+        self.template = ''
+        self.dashboard_guid = ''
+        self.retry_limit = 5
+        self.account_id = ''
+
+    def client_init(self):
+
+        headers = {
+            'API-Key': self.api_token ,
+            'Content-Type': 'application/json'
+        }
+
+        try: 
+            self.client = GraphqlClient(endpoint=self.api_endpoint, headers=headers)
+        except Exception:
+            self.log.error('Error in NR Client initialization: %s', traceback.format_exc())
+            self.log.info('Exiting...')
+            exit(0)
+   
+        ### Check authorization
+
+    def api_check(self):
+
+        query = '''
+        {
+        actor {
+            user {
+            name
+            }
+        }
+        }
+        '''
+
+        try: 
+            data = self.client.execute(query=query)
+            token_owner = data['data']['actor']['user']['name']
+            self.log.info('Auth is successful, token from %s ', token_owner)  
+            return True
+        except Exception as e:
+            self.log.error('Something wrong with API : %s', e)
+            return False
+
+    ### Check dashboard with NAME [project]
+    def dashboard_link(self, project):
+
+        #TODO: Improve dashboard naming, remove hardcoded part
+        search_query = f"name LIKE '%Load Tests [{project}]%'"
+
+        search_dashboard = '''
+        {
+        actor {
+            entitySearch(query: "%s") {
+            count
+            query
+            results {
+                entities {
+                guid
+                permalink
+                }
+            }
+            }
+        }
+        }
+        ''' % search_query
+
+        data = self.client.execute(query=search_dashboard)
+        try: 
+            if data['data']['actor']['entitySearch']['count'] > 0:
+                self.log.info('Dashboard found:  %s ', f'Load Tests [{project}]')
+                self.dashboard_guid = data['data']['actor']['entitySearch']['results']['entities'][1]['guid']
+                return data['data']['actor']['entitySearch']['results']['entities'][1]['permalink']
+            else:
+                self.log.info(f'Dashboard for project "{project}" doesnt exist, creating')
+                return self.dashboard_create(project)
+        except Exception as e:
+            self.log.warning('Problem with GraphQL dashboard response, %s' % e)
+
+
+    def dashboard_create(self, project):
+        dashboard_create_query = self.template.replace(
+            'PROJECT_PLACE_HOLDER', project).replace(
+            'ACCOUNT_PLACE_HOLDER', str(self.account_id)
+            )
+        try:
+            data = self.client.execute(query=dashboard_create_query)
+            self.log.info(f'Dashboard for project "{project}" created, sending the link')
+            guid = data['data']['dashboardCreate']['entityResult']['guid']
+            time.sleep(3)
+            search_dashboard_query = '''
+            {
+            actor {
+                entitySearch(query: "parentId ='%s'") {
+                count
+                query
+                results {
+                    entities {
+                    guid
+                    permalink
+                    }
+                }
+                }
+            }
+            }
+            ''' % guid
+
+            retry = self.retry_limit    
+
+            while True:
+                try: 
+                    data = self.client.execute(query=search_dashboard_query)
+                    permalink = data['data']['actor']['entitySearch']['results']['entities'][0]['permalink']
+                    self.dashboard_guid = data['data']['actor']['entitySearch']['results']['entities'][0]['guid']
+                    return permalink
+                except Exception:
+                    if retry > 0:
+                        retry -= 1
+                        self.log.warning('Permalink is not ready yet, sleeping 10 sec')
+                        time.sleep(10)
+                        continue
+                    self.log.warning('Permalink is not ready yet, failing back to default link')
+                    return "https://one.newrelic.com/dashboards"
+
+                ### If permalink is not ready, skipping whole url generation.
+        except:
+            self.log.warning(f'Dashboard for project {project} can not be created, possible problems are: ')
+            self.log.warning('Template rendering, API access, unexpected letters in project, or account-id.')
+            self.log.warning('Check the documentation. Meanwhile sending default link for NewRelic dashboards')
+            return "https://one.newrelic.com/dashboards"
+
+
+    def create_pdf(self, time_start, time_end):
+        self.log.info('PDF report generation is coming. Waiting all data in place.')
+        time.sleep(10)
+        now = datetime.datetime.now()
+        date_time = now.strftime("%Y-%m-%d-%H-%M-%S")
+
+        pdf_link_query = '''
+        mutation {
+                dashboardCreateSnapshotUrl(
+                    guid: "%s", 
+                    params: {
+                        timeWindow: {
+                            beginTime: %d, 
+                            endTime: %d
+                                    }
+                            }
+                    )
+            } 
+        ''' % (self.dashboard_guid, time_start, time_end)
+        
+        try:
+            retry = self.retry_limit  
+            data = self.client.execute(query=pdf_link_query)
+            pdf_link = data['data']['dashboardCreateSnapshotUrl']
+            while pdf_link == None and retry != 0:
+                self.log.warning('Problem with PDF link generating, denied of service, retrying...')
+                retry -= 1
+
+            self.log.info('PDF report link %s' % pdf_link)
+            r = requests.get(pdf_link, allow_redirects=True)
+            r.raise_for_status()
+            try:
+                report_filename = f'static_report_{date_time}.pdf'
+                with open(report_filename, 'wb') as f:
+                    f.write(r.content)
+                self.log.info('Static report saved as %s' % report_filename)
+            except:
+                self.log.warning('Problem with PDF retrieving, network or firewall problem.')
+        except:
+            self.log.warning('Problem with PDF link generating, denied of service')
+
+    def get_account_id(self):
+        accounts_query = '''
+            {
+            actor {
+                accounts {
+                id
+                }
+            }
+            }
+        '''
+        try: 
+            data = self.client.execute(query=accounts_query)
+            count = len(data['data']['actor']['accounts'])
+            first_account_id = data['data']['actor']['accounts'][0]['id']
+            self.log.info(f'Found {count} accounts, will use {first_account_id} as default, use account-id to redefine')
+            return first_account_id
+        except Exception as e:
+            self.log.warning('Problem with GraphQL accounts response, %s' % e)
+            return ''
+            

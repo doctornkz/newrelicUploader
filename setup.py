@@ -2,7 +2,7 @@ from setuptools import setup
 
 setup(
     name="bztnewrelic",
-    version="0.2.5",
+    version="0.3.0",
 
     author="Oles Pisarenko",
     author_email="doctornkz@ya.ru",
@@ -12,6 +12,9 @@ setup(
     keywords=[],
 
     packages=["bztnewrelic"],
-    install_requires=['bzt','newrelic-telemetry-sdk'],
+    install_requires=[
+        'bzt',
+        'newrelic-telemetry-sdk',
+        'python_graphql_client'],
     include_package_data=True,
 )
