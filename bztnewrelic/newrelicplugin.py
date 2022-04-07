@@ -2,7 +2,6 @@
 Based on bza.py (Blazemeter API client) module, and adopted as-is for NewRelic API
 """
 
-from asyncio import sleep
 import copy
 import datetime
 import logging
