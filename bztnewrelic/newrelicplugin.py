@@ -2,6 +2,7 @@
 Based on bza.py (Blazemeter API client) module, and adopted as-is for NewRelic API
 """
 
+from asyncio import sleep
 import copy
 import datetime
 import logging
@@ -135,12 +136,12 @@ class NewRelicUploader(Reporter, AggregatorListener, Singletone):
 
     def __init__(self):
         super(NewRelicUploader, self).__init__()
-        self.browser_open = 'start'
+        self.browser_open = 'none'
         self.project = 'myproject'
         self.custom_tags = {}
         self.additional_tags = {}
         self.kpi_buffer = []
-        self.send_interval = 30
+        self.send_interval = 5
         self._last_status_check = time.time()
         self.last_dispatch = 0
         self.results_url = None
@@ -232,6 +233,7 @@ class NewRelicUploader(Reporter, AggregatorListener, Singletone):
         #### Dashboard manager related settings: 
         self.static_report = self.settings.get("static-report", 'false')
         self.api_endpoint = self.settings.get("api-endpoint", 'https://api.newrelic.com/graphql')
+        self.account_id = self.settings.get("account-id", '')
 
         api_token = self.api_token_processor()
         if not api_token:
@@ -245,7 +247,19 @@ class NewRelicUploader(Reporter, AggregatorListener, Singletone):
 
         self._dashboard = DashboardManager()
         self._dashboard.api_token = api_token
+        self._dashboard.account_id = self.account_id
         self._dashboard.client_init()
+
+
+
+        if self.account_id is '':
+            if self._dashboard.get_account_id() == '':
+                self.log.warning('NewRelic AccountId is not set. Please check `account-id` config setting ')
+                self.log.warning('Dashboard generator is disabled.')
+                self.dashboard_generator_on = False
+            else: 
+                self._dashboard.account_id = self.account_id
+
 
         if not self._dashboard.api_check():
             self.log.warning('NewRelic API token is wrong or enpoint is not correct.')
@@ -455,6 +469,7 @@ class DashboardManager():
         self.template = ''
         self.dashboard_guid = ''
         self.retry_limit = 5
+        self.account_id = ''
 
     def client_init(self):
 
@@ -516,21 +531,26 @@ class DashboardManager():
         }
         ''' % search_query
 
-        data = (self.client.execute(query=search_dashboard))
-        
-        if data['data']['actor']['entitySearch']['count'] > 0:
-            self.log.info('Dashboard found:  %s ', f'Load Tests [{project}]')
-            self.dashboard_guid = data['data']['actor']['entitySearch']['results']['entities'][1]['guid']
-            return data['data']['actor']['entitySearch']['results']['entities'][1]['permalink']
-        else:
-            self.log.info(f'Dashboard for project "{project}" doesnt exist, creating')
-            return self.dashboard_create(project)
+        data = self.client.execute(query=search_dashboard)
+        try: 
+            if data['data']['actor']['entitySearch']['count'] > 0:
+                self.log.info('Dashboard found:  %s ', f'Load Tests [{project}]')
+                self.dashboard_guid = data['data']['actor']['entitySearch']['results']['entities'][1]['guid']
+                return data['data']['actor']['entitySearch']['results']['entities'][1]['permalink']
+            else:
+                self.log.info(f'Dashboard for project "{project}" doesnt exist, creating')
+                return self.dashboard_create(project)
+        except Exception as e:
+            self.log.warning('Problem with GraphQL dashboard response, %s' % e)
 
 
     def dashboard_create(self, project):
-        dashboard_create_query = self.template.replace('PROJECT_PLACE_HOLDER', project)
+        dashboard_create_query = self.template.replace(
+            'PROJECT_PLACE_HOLDER', project).replace(
+            'ACCOUNT_PLACE_HOLDER', str(self.account_id)
+            )
         try:
-            data = (self.client.execute(query=dashboard_create_query))
+            data = self.client.execute(query=dashboard_create_query)
             self.log.info(f'Dashboard for project "{project}" created, sending the link')
             guid = data['data']['dashboardCreate']['entityResult']['guid']
             time.sleep(3)
@@ -555,7 +575,7 @@ class DashboardManager():
 
             while True:
                 try: 
-                    data = (self.client.execute(query=search_dashboard_query))
+                    data = self.client.execute(query=search_dashboard_query)
                     permalink = data['data']['actor']['entitySearch']['results']['entities'][0]['permalink']
                     self.dashboard_guid = data['data']['actor']['entitySearch']['results']['entities'][0]['guid']
                     return permalink
@@ -571,14 +591,16 @@ class DashboardManager():
                 ### If permalink is not ready, skipping whole url generation.
         except:
             self.log.warning(f'Dashboard for project {project} can not be created, possible problems are: ')
-            self.log.warning('Template rendering, API access, unexpected letters in project, check the documentation')
-            self.log.warning('Meanwhile sending default link for NewRelic dashboards')
+            self.log.warning('Template rendering, API access, unexpected letters in project, or account-id.')
+            self.log.warning('Check the documentation. Meanwhile sending default link for NewRelic dashboards')
             return "https://one.newrelic.com/dashboards"
 
 
     def create_pdf(self, time_start, time_end):
+        self.log.info('PDF report generation is coming. Waiting all data in place.')
+        time.sleep(10)
         now = datetime.datetime.now()
-        date_time = now.strftime("%Y-%m-%d-%H:%M:%S")
+        date_time = now.strftime("%Y-%m-%d-%H-%M-%S")
 
         pdf_link_query = '''
         mutation {
@@ -596,7 +618,7 @@ class DashboardManager():
         
         try:
             retry = self.retry_limit  
-            data = (self.client.execute(query=pdf_link_query))
+            data = self.client.execute(query=pdf_link_query)
             pdf_link = data['data']['dashboardCreateSnapshotUrl']
             while pdf_link == None and retry != 0:
                 self.log.warning('Problem with PDF link generating, denied of service, retrying...')
@@ -615,3 +637,23 @@ class DashboardManager():
         except:
             self.log.warning('Problem with PDF link generating, denied of service')
 
+    def get_account_id(self):
+        accounts_query = '''
+            {
+            actor {
+                accounts {
+                id
+                }
+            }
+            }
+        '''
+        try: 
+            data = self.client.execute(query=accounts_query)
+            count = len(data['data']['actor']['accounts'])
+            first_account_id = data['data']['actor']['accounts'][0]['id']
+            self.log.info(f'Found {count} accounts, will use {first_account_id} as default, use account-id to redefine')
+            return first_account_id
+        except Exception as e:
+            self.log.warning('Problem with GraphQL accounts response, %s' % e)
+            return ''
+            
