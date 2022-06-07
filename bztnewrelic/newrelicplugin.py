@@ -12,7 +12,9 @@ import traceback
 import uuid
 from functools import wraps
 from ssl import SSLError
+from urllib.error import URLError
 
+import bzt.engine
 import requests
 from requests.exceptions import ReadTimeout
 
@@ -20,15 +22,14 @@ from bzt import TaurusInternalException, TaurusNetworkError, TaurusConfigError
 from bzt.engine import Reporter
 from bzt.engine import Singletone
 from bzt.modules.aggregator import DataPoint, KPISet, ResultsProvider, AggregatorListener
-from bzt.six import iteritems, URLError
 from bzt.utils import open_browser
 from bzt.utils import dehumanize_time
 
 from newrelic_telemetry_sdk import GaugeMetric, MetricClient
 from python_graphql_client import GraphqlClient
 
-
 NETWORK_PROBLEMS = (IOError, URLError, SSLError, ReadTimeout, TaurusNetworkError)
+
 
 def send_with_retry(method):
     @wraps(method)
@@ -55,8 +56,9 @@ def send_with_retry(method):
 class Session(object):
     def __init__(self):
         super(Session, self).__init__()
+        self.metric_client = None
         self.dashboard_url = 'https://onenr.io/PLACEHOLDER'
-     
+
         self.timeout = 30
         self.logger_limit = 256
         self.token = None
@@ -66,9 +68,8 @@ class Session(object):
         self._retry_limit = 5
         self.uuid = None
 
-        
     def client_init(self):
-        try: 
+        try:
             self.metric_client = MetricClient(self.token)
 
         except Exception:
@@ -76,10 +77,8 @@ class Session(object):
             self.log.info('Exiting...')
             exit(0)
 
- 
     def _request(self, data=None, headers=None, method=None, raw_result=False, retry=True):
         """
-        :param url: str
         :type data: Union[dict,str]
         :param headers: dict
         :param method: str
@@ -87,28 +86,27 @@ class Session(object):
         """
         retry_limit = self._retry_limit
 
-
         while True:
             try:
                 response = self.metric_client.send_batch(data)
                 response.raise_for_status()
                 self.log.debug("Status code from API: %d", response.status)
-            except:
+            except BaseException:
                 if retry and retry_limit:
                     retry_limit -= 1
                     self.log.warning("Problem with API, connectivity. Retry...")
                     continue
                 raise
             break
-        
+
         return 0
 
     def ping(self):
         """ Quick check if we can access the service """
-        result = self.metric_client.send({}) 
+        result = self.metric_client.send({})
         if result.status >= 300:
-            raise Exception('HTTP status code from API is not 2xx, check access permissions or firewall settings', result.status) 
-
+            raise Exception('HTTP status code from API is not 2xx, check access permissions or firewall settings',
+                            result.status)
 
     def send_kpi_data(self, data, is_check_response=True, submit_target=None):
         """
@@ -129,28 +127,31 @@ class Session(object):
 class NewRelicUploader(Reporter, AggregatorListener, Singletone):
     """
     Reporter class
-
     :type _session: bzt.sfa.Session or None
     """
 
     def __init__(self):
         super(NewRelicUploader, self).__init__()
+        self.sess_id = None
+        self.dashboard_template_path = None
+        self.account_id = None
+        self._dashboard = None
+        self.api_endpoint = None
+        self.static_report = None
+        self.time_start = None
         self.browser_open = 'none'
         self.project = 'myproject'
         self.custom_tags = {}
         self.additional_tags = {}
         self.kpi_buffer = []
         self.send_interval = 5
-        self._last_status_check = time.time()
         self.last_dispatch = 0
         self.results_url = None
-        self._test = None
-        self._master = None
         self._session = None
         self.first_ts = sys.maxsize
         self.last_ts = 0
         self.dashboard_generator_on = False
-        self.dashboard_url = 'https://one.newrelic.com/dashboards' # default URL
+        self.dashboard_url = 'https://one.newrelic.com/dashboards'  # default URL
 
         self._dpoint_serializer = DatapointSerializerNF(self)
         self.log = logging.getLogger(self.__class__.__name__)
@@ -167,22 +168,22 @@ class NewRelicUploader(Reporter, AggregatorListener, Singletone):
             token = os.environ['NEW_RELIC_INSERT_KEY']
             self.log.info("Token found in NEW_RELIC_INSERT_KEY environment variable")
             return token
-        except:
+        except BaseException:
             self.log.info("Token not found in NEW_RELIC_INSERT_KEY environment variable")
             pass
-        # Read from file
-        try:
-            token_file = self.settings.get("token-file","")
+            # Read from file
+            token_file = self.settings.get("token-file", "")
             if token_file:
-                with open(token_file, 'r') as handle:
+                try:
+                    with open(token_file, 'r') as handle:
                         token = handle.read().strip()
                         self.log.info("Token found in file %s:", token_file)
                         return token
+                except BaseException:
+                    self.log.info("Token can't be retrieved from file: %s, please check path or access", token_file)
             else:
                 self.log.info("Parameter token_file is empty or doesn't exist")
-        except:
-            self.log.info("Token can't be retrieved from file: %s, please check path or access", token_file)
-            
+
         return None
 
     # TODO: deduplicate
@@ -198,24 +199,23 @@ class NewRelicUploader(Reporter, AggregatorListener, Singletone):
             api_token = os.environ['NEW_RELIC_API_KEY']
             self.log.info("Token found in NEW_RELIC_API_KEY environment variable")
             return api_token
-        except:
+        except BaseException:
             self.log.info("API token not found in NEW_RELIC_API_KEY environment variable")
             pass
-        # Read from file
-        try:
-            api_token_file = self.settings.get("api-token-file","")
+            # Read from file
+            api_token_file = self.settings.get("api-token-file", "")
             if api_token_file:
-                with open(api_token_file, 'r') as handle:
+                try:
+                    with open(api_token_file, 'r') as handle:
                         api_token = handle.read().strip()
                         self.log.info("Token found in file %s:", api_token_file)
                         return api_token
+                except BaseException:
+                    self.log.info("Token can't be retrieved from file: %s, please check path or access", api_token_file)
             else:
                 self.log.info("Parameter api_token_file is empty or doesn't exist")
-        except:
-            self.log.info("Token can't be retrieved from file: %s, please check path or access", api_token_file)
-            
-        return None
 
+        return None
 
     def prepare(self):
         """
@@ -227,7 +227,6 @@ class NewRelicUploader(Reporter, AggregatorListener, Singletone):
         self.project = self.settings.get("project", self.project)
         self.custom_tags = self.settings.get("custom-tags", self.custom_tags)
         self._dpoint_serializer.multi = self.settings.get("report-times-multiplier", self._dpoint_serializer.multi)
-        
 
         #### Dashboard manager related settings: 
         self.static_report = self.settings.get("static-report", 'false')
@@ -236,8 +235,8 @@ class NewRelicUploader(Reporter, AggregatorListener, Singletone):
 
         api_token = self.api_token_processor()
         if not api_token:
-             self.log.warning("NewRelic API token is not provided, dashboard generator is disabled.")
-             self.dashboard_generator_on = False
+            self.log.warning("NewRelic API token is not provided, dashboard generator is disabled.")
+            self.dashboard_generator_on = False
         else:
             self.log.info("NewRelic API token is provided, dashboard generator is activated.")
             self.dashboard_generator_on = True
@@ -255,7 +254,7 @@ class NewRelicUploader(Reporter, AggregatorListener, Singletone):
                 self.log.warning('NewRelic AccountId is not set. Please check `account-id` config setting ')
                 self.log.warning('Dashboard generator is disabled.')
                 self.dashboard_generator_on = False
-            else: 
+            else:
                 self._dashboard.account_id = self.account_id
 
         if not self._dashboard.api_check():
@@ -277,7 +276,6 @@ class NewRelicUploader(Reporter, AggregatorListener, Singletone):
             self.log.warning('Problem with template', e)
             self.dashboard_generator_on = False
             self.log.warning('Dashboard generator is disabled.')
-        
 
         if self.dashboard_generator_on:
             self.dashboard_url = self._dashboard.dashboard_link(self.project)
@@ -299,9 +297,9 @@ class NewRelicUploader(Reporter, AggregatorListener, Singletone):
         self._session.dashboard_url = self.dashboard_url
         self._session.timeout = dehumanize_time(self.settings.get("timeout", self._session.timeout))
         try:
-           self._session.ping()  # to check connectivity and auth
+            self._session.ping()  # to check connectivity and auth
         except Exception:
-           raise
+            raise
 
         if isinstance(self.engine.aggregator, ResultsProvider):
             self.engine.aggregator.add_listener(self)
@@ -320,8 +318,6 @@ class NewRelicUploader(Reporter, AggregatorListener, Singletone):
         if self.browser_open in ('start', 'both'):
             open_browser(self.results_url)
 
-
-
     def post_process(self):
         """
         Upload results if possible
@@ -329,8 +325,9 @@ class NewRelicUploader(Reporter, AggregatorListener, Singletone):
         self.log.debug("KPI bulk buffer len in post-proc: %s", len(self.kpi_buffer))
         self.log.info("Sending remaining KPI data to server...")
 
+        # noinspection PyTypeChecker
         self.__send_data(self.kpi_buffer, False, True)
-        
+
         self.kpi_buffer = []
 
         if self.browser_open in ('end', 'both'):
@@ -341,12 +338,11 @@ class NewRelicUploader(Reporter, AggregatorListener, Singletone):
             self.dashboard_url = self._dashboard.dashboard_link(self.project)
 
         self.log.info("Report link: %s", self.dashboard_url)
-        
+
         if self.static_report:
             self._dashboard.create_pdf(self.time_start, time.time() * 1000)
 
-        self._session.client_close() 
-        
+        self._session.client_close()
 
     def check(self):
         """
@@ -356,6 +352,7 @@ class NewRelicUploader(Reporter, AggregatorListener, Singletone):
         if self.last_dispatch < (time.time() - self.send_interval):
             self.last_dispatch = time.time()
             if len(self.kpi_buffer):
+                # noinspection PyTypeChecker
                 self.__send_data(self.kpi_buffer)
                 self.kpi_buffer = []
         return super(NewRelicUploader, self).check()
@@ -372,13 +369,12 @@ class NewRelicUploader(Reporter, AggregatorListener, Singletone):
 
         self._session.send_kpi_data(serialized, do_check)
 
-    def aggregated_second(self, data):
+    def aggregated_second(self, data: DataPoint):
         """
         Send online data
-        :param data: DataPoint
+        :type data: DataPoint
         """
         self.kpi_buffer.append(data)
-
 
 
 class DatapointSerializerNF(object):
@@ -411,13 +407,13 @@ class DatapointSerializerNF(object):
             # intervals are received in the additive way
             for dpoint in data_buffer:
                 time_stamp = dpoint[DataPoint.TIMESTAMP]
-                for label, kpi_set in iteritems(dpoint[DataPoint.CURRENT]):
+                for label, kpi_set in dpoint[DataPoint.CURRENT].items():
                     nrtags = copy.deepcopy(tags)
                     nrtags.update({'label': label or 'OVERALL'})
                     nr_batch = self.__convert_data(kpi_set, time_stamp * self.multi, nrtags)
                     nr_metrics.extend(nr_batch)
 
-        self.log.debug("Custom metrics in batch: %d", len(nr_batch))
+                    self.log.debug("Custom metrics in batch: %d", len(nr_batch))
 
         return nr_metrics
 
@@ -427,17 +423,17 @@ class DatapointSerializerNF(object):
         tmin = int(self.multi * item[KPISet.PERCENTILES]["0.0"]) if "0.0" in item[KPISet.PERCENTILES] else 0
         tmax = int(self.multi * item[KPISet.PERCENTILES]["100.0"]) if "100.0" in item[KPISet.PERCENTILES] else 0
         tavg = self.multi * item[KPISet.AVG_RESP_TIME]
-        
-        nrtags["timestamp"] = timestamp 
+
+        nrtags["timestamp"] = timestamp
         self.log.debug("Timestamp in data convertion: %d", timestamp)
-        
+
         data = [
             GaugeMetric('bztRPS', item[KPISet.SAMPLE_COUNT], nrtags, end_time_ms=timestamp),
             GaugeMetric('bztThreads', item[KPISet.CONCURRENCY], nrtags, end_time_ms=timestamp),
             GaugeMetric('bztFailures', item[KPISet.FAILURES], nrtags, end_time_ms=timestamp),
             GaugeMetric('bztmin', tmin, nrtags, end_time_ms=timestamp),
             GaugeMetric('bztmax', tmax, nrtags, end_time_ms=timestamp),
-            GaugeMetric('bztavg', tavg, nrtags, end_time_ms=timestamp) 
+            GaugeMetric('bztavg', tavg, nrtags, end_time_ms=timestamp)
         ]
 
         for p in item[KPISet.PERCENTILES]:
@@ -454,10 +450,11 @@ class DatapointSerializerNF(object):
         return data
 
 
-class DashboardManager():
+class DashboardManager:
 
     ### Client initialization 
     def __init__(self) -> None:
+        self.client = None
         self.api_token = None
         self.log = logging.getLogger(self.__class__.__name__)
         self.api_endpoint = 'https://api.newrelic.com/graphql'
@@ -471,17 +468,17 @@ class DashboardManager():
     def client_init(self):
 
         headers = {
-            'API-Key': self.api_token ,
+            'API-Key': self.api_token,
             'Content-Type': 'application/json'
         }
 
-        try: 
+        try:
             self.client = GraphqlClient(endpoint=self.api_endpoint, headers=headers)
         except Exception:
             self.log.error('Error in NR Client initialization: %s', traceback.format_exc())
             self.log.info('Exiting...')
             exit(0)
-   
+
         ### Check authorization
 
     def api_check(self):
@@ -496,10 +493,10 @@ class DashboardManager():
         }
         '''
 
-        try: 
+        try:
             data = self.client.execute(query=query)
             token_owner = data['data']['actor']['user']['name']
-            self.log.info('Auth is successful, token from %s ', token_owner)  
+            self.log.info('Auth is successful, token from %s ', token_owner)
             return True
         except Exception as e:
             self.log.error('Something wrong with API : %s', e)
@@ -508,7 +505,7 @@ class DashboardManager():
     ### Check dashboard with NAME [project]
     def dashboard_link(self, project):
 
-        #TODO: Improve dashboard naming, remove hardcoded part
+        # TODO: Improve dashboard naming, remove hardcoded part
         search_query = f"name LIKE '%Load Tests [{project}]%'"
 
         search_dashboard = '''
@@ -529,7 +526,7 @@ class DashboardManager():
         ''' % search_query
 
         data = self.client.execute(query=search_dashboard)
-        try: 
+        try:
             if data['data']['actor']['entitySearch']['count'] > 0:
                 self.log.info('Dashboard found:  %s ', f'Load Tests [{project}]')
                 self.dashboard_guid = data['data']['actor']['entitySearch']['results']['entities'][1]['guid']
@@ -540,12 +537,11 @@ class DashboardManager():
         except Exception as e:
             self.log.warning('Problem with GraphQL dashboard response, %s' % e)
 
-
     def dashboard_create(self, project):
         dashboard_create_query = self.template.replace(
             'PROJECT_PLACE_HOLDER', project).replace(
             'ACCOUNT_PLACE_HOLDER', str(self.account_id)
-            )
+        )
         try:
             data = self.client.execute(query=dashboard_create_query)
             self.log.info(f'Dashboard for project "{project}" created, sending the link')
@@ -568,10 +564,10 @@ class DashboardManager():
             }
             ''' % guid
 
-            retry = self.retry_limit    
+            retry = self.retry_limit
 
             while True:
-                try: 
+                try:
                     data = self.client.execute(query=search_dashboard_query)
                     permalink = data['data']['actor']['entitySearch']['results']['entities'][0]['permalink']
                     self.dashboard_guid = data['data']['actor']['entitySearch']['results']['entities'][0]['guid']
@@ -586,12 +582,11 @@ class DashboardManager():
                     return "https://one.newrelic.com/dashboards"
 
                 ### If permalink is not ready, skipping whole url generation.
-        except:
+        except BaseException:
             self.log.warning(f'Dashboard for project {project} can not be created, possible problems are: ')
             self.log.warning('Template rendering, API access, unexpected letters in project, or account-id.')
             self.log.warning('Check the documentation. Meanwhile sending default link for NewRelic dashboards')
             return "https://one.newrelic.com/dashboards"
-
 
     def create_pdf(self, time_start, time_end):
         self.log.info('PDF report generation is coming. Waiting all data in place.')
@@ -612,12 +607,12 @@ class DashboardManager():
                     )
             } 
         ''' % (self.dashboard_guid, time_start, time_end)
-        
+
         try:
-            retry = self.retry_limit  
+            retry = self.retry_limit
             data = self.client.execute(query=pdf_link_query)
             pdf_link = data['data']['dashboardCreateSnapshotUrl']
-            while pdf_link == None and retry != 0:
+            while pdf_link is None and retry != 0:
                 self.log.warning('Problem with PDF link generating, denied of service, retrying...')
                 retry -= 1
 
@@ -629,9 +624,9 @@ class DashboardManager():
                 with open(report_filename, 'wb') as f:
                     f.write(r.content)
                 self.log.info('Static report saved as %s' % report_filename)
-            except:
+            except BaseException:
                 self.log.warning('Problem with PDF retrieving, network or firewall problem.')
-        except:
+        except BaseException:
             self.log.warning('Problem with PDF link generating, denied of service')
 
     def get_account_id(self):
@@ -644,7 +639,7 @@ class DashboardManager():
             }
             }
         '''
-        try: 
+        try:
             data = self.client.execute(query=accounts_query)
             count = len(data['data']['actor']['accounts'])
             first_account_id = data['data']['actor']['accounts'][0]['id']
@@ -653,4 +648,3 @@ class DashboardManager():
         except Exception as e:
             self.log.warning('Problem with GraphQL accounts response, %s' % e)
             return ''
-            

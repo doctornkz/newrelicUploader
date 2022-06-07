@@ -14,6 +14,7 @@ setup(
     packages=["bztnewrelic"],
     install_requires=[
         'bzt',
+        'requests',
         'newrelic-telemetry-sdk',
         'python_graphql_client'],
     include_package_data=True,
