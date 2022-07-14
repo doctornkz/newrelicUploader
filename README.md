@@ -45,14 +45,14 @@ modules:
 
 ```
 
-## Authentification
+## Authentication
 
 You can use:
 
 - `NEW_RELIC_INSERT_KEY` environment variable to pass the token
 - `token` from configuration file (see example above)
 - String from file `token-file` (see example above)
-If it's failing, test will be intterupted.
+If it's failing, test will be interrupted.
 
 ## Starting
 
