@@ -410,19 +410,30 @@ class DatapointSerializerNF(object):
                 for label, kpi_set in dpoint[DataPoint.CURRENT].items():
                     nrtags = copy.deepcopy(tags)
                     nrtags.update({'label': label or 'OVERALL'})
-                    nr_batch = self.__convert_data(kpi_set, time_stamp * self.multi, nrtags)
+                    nr_batch = self.__convert_current_data(kpi_set, time_stamp * self.multi, nrtags)
                     nr_metrics.extend(nr_batch)
 
-                    self.log.debug("Custom metrics in batch: %d", len(nr_batch))
+                    self.log.debug("Current metrics in batch: %d", len(nr_batch))
+
+                for label, kpi_set in dpoint[DataPoint.CUMULATIVE].items():
+                    nrtags = copy.deepcopy(tags)
+                    nrtags.update({'label': label or 'OVERALL'})
+                    nr_batch_cumulative = self.__convert_cumulative_data(kpi_set, time_stamp * self.multi, nrtags)
+                    nr_metrics.extend(nr_batch_cumulative)
+
+                    self.log.debug("Cumulative metrics in batch: %d", len(nr_batch))
 
         return nr_metrics
 
-    def __convert_data(self, item, timestamp, nrtags):
+
+    def __convert_current_data(self, item, timestamp, nrtags):
 
         # Overall stats : RPS, Threads, procentiles and mix/man/avg
         tmin = int(self.multi * item[KPISet.PERCENTILES]["0.0"]) if "0.0" in item[KPISet.PERCENTILES] else 0
         tmax = int(self.multi * item[KPISet.PERCENTILES]["100.0"]) if "100.0" in item[KPISet.PERCENTILES] else 0
         tavg = self.multi * item[KPISet.AVG_RESP_TIME]
+        tlat = self.multi * item[KPISet.AVG_LATENCY]
+        tconn = self.multi * item[KPISet.AVG_CONN_TIME]
 
         nrtags["timestamp"] = timestamp
         self.log.debug("Timestamp in data convertion: %d", timestamp)
@@ -433,7 +444,9 @@ class DatapointSerializerNF(object):
             GaugeMetric('bztFailures', item[KPISet.FAILURES], nrtags, end_time_ms=timestamp),
             GaugeMetric('bztmin', tmin, nrtags, end_time_ms=timestamp),
             GaugeMetric('bztmax', tmax, nrtags, end_time_ms=timestamp),
-            GaugeMetric('bztavg', tavg, nrtags, end_time_ms=timestamp)
+            GaugeMetric('bztavg', tavg, nrtags, end_time_ms=timestamp),
+            GaugeMetric('bztlat', tlat, nrtags, end_time_ms=timestamp),
+            GaugeMetric('bztconn', tconn, nrtags, end_time_ms=timestamp)
         ]
 
         for p in item[KPISet.PERCENTILES]:
@@ -446,6 +459,20 @@ class DatapointSerializerNF(object):
             error_tags['rc'] = rcode
             rcnt = item[KPISet.RESP_CODES][rcode]
             data.append(GaugeMetric('bztcode', rcnt, error_tags, end_time_ms=timestamp))
+
+        return data
+
+    def __convert_cumulative_data(self, item, timestamp, nrtags):
+        # Cumulative stats : Procentiles only
+
+        nrtags["timestamp"] = timestamp
+        self.log.debug("Timestamp in data convertion: %d", timestamp)
+
+        data = []
+
+        for p in item[KPISet.PERCENTILES]:
+            tperc = int(self.multi * item[KPISet.PERCENTILES][p])
+            data.append(GaugeMetric('bztpc' + p, tperc, nrtags, end_time_ms=timestamp))
 
         return data
 
