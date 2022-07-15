@@ -248,7 +248,7 @@ class NewRelicUploader(Reporter, AggregatorListener, Singletone):
         self._dashboard.account_id = self.account_id
         self._dashboard.client_init()
 
-        if self.account_id is '':
+        if self.account_id == '':
             self.account_id = self._dashboard.get_account_id()
             if self.account_id == '':
                 self.log.warning('NewRelic AccountId is not set. Please check `account-id` config setting ')
